@@ -4,13 +4,20 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import os
 import re
 import textwrap
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+try:  # pragma: no cover - import guarded for environments without OpenAI SDK
+    from openai import AsyncOpenAI
+except ImportError:  # pragma: no cover - handled gracefully when dependency missing
+    AsyncOpenAI = None  # type: ignore
 
 from .config import (
     ConfigStore,
@@ -37,6 +44,19 @@ CRISIS_KEYWORDS = {
 }
 
 DEFAULT_THREAD_NAME = "Beicht-Thread"
+
+
+@dataclass
+class ModerationResult:
+    """Structured result returned by the AI moderation helper."""
+
+    flagged: bool
+    categories: Dict[str, bool]
+    error: Optional[str] = None
+
+    @property
+    def flagged_labels(self) -> List[str]:
+        return [label.replace("_", " ") for label, active in self.categories.items() if active]
 
 
 class ConfessionModal(discord.ui.Modal, title="Anonyme Beichte"):
@@ -137,6 +157,14 @@ class BeichtBot(commands.Bot):
         self.config = config or ConfigStore()
         self.cooldowns: Dict[Tuple[int, int], float] = {}
         self.session_tasks: List[asyncio.Task[None]] = []
+        self._openai_client: Optional[AsyncOpenAI] = None
+        api_key = os.getenv("OPENAI_API_KEY")
+        if AsyncOpenAI and api_key:
+            self._openai_client = AsyncOpenAI(api_key=api_key)
+        elif not api_key:
+            log.info("OPENAI_API_KEY not set – AI moderation disabled.")
+        else:
+            log.warning("OpenAI SDK not available – AI moderation disabled.")
 
     async def setup_hook(self) -> None:
         self.tree.add_command(self.beichten)
@@ -220,6 +248,41 @@ class BeichtBot(commands.Bot):
     def _check_crisis(self, text: str) -> bool:
         lowered = text.lower()
         return any(keyword in lowered for keyword in CRISIS_KEYWORDS)
+
+    async def _run_ai_moderation(self, text: str) -> Optional[ModerationResult]:
+        if not self._openai_client:
+            return None
+        try:
+            response = await self._openai_client.moderations.create(
+                model="omni-moderation-latest",
+                input=text,
+            )
+        except Exception as exc:  # pragma: no cover - network failure
+            log.warning("OpenAI moderation failed: %s", exc)
+            return ModerationResult(flagged=False, categories={}, error=str(exc))
+
+        if not getattr(response, "results", None):
+            return ModerationResult(flagged=False, categories={})
+
+        result = response.results[0]
+        categories_data: Dict[str, bool] = {}
+        categories_obj = getattr(result, "categories", {})
+        if hasattr(categories_obj, "model_dump"):
+            categories_data = {
+                str(name): bool(value)
+                for name, value in categories_obj.model_dump().items()
+            }
+        elif isinstance(categories_obj, dict):
+            categories_data = {str(name): bool(value) for name, value in categories_obj.items()}
+        else:
+            categories_data = {
+                str(name): bool(getattr(categories_obj, name))
+                for name in dir(categories_obj)
+                if not name.startswith("_") and isinstance(getattr(categories_obj, name), bool)
+            }
+
+        flagged = bool(getattr(result, "flagged", False))
+        return ModerationResult(flagged=flagged, categories=categories_data)
 
     async def _notify_mods(
         self,
@@ -310,6 +373,20 @@ class BeichtBot(commands.Bot):
         if crisis_detected:
             hints.append("Wenn du in Gefahr bist, suche bitte professionelle Hilfe.")
 
+        moderation_result: Optional[ModerationResult] = None
+        if config.allow_ai_moderation:
+            moderation_result = await self._run_ai_moderation(confession)
+            if moderation_result and moderation_result.flagged:
+                labels = moderation_result.flagged_labels
+                if labels:
+                    hints.append(
+                        "⚠️ Automatische Moderation: " + ", ".join(labels)
+                    )
+                else:
+                    hints.append("⚠️ Automatische Moderation hat den Beitrag markiert.")
+            elif moderation_result and moderation_result.error:
+                log.info("AI moderation error: %s", moderation_result.error)
+
         try:
             message = await target.send(content, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException as exc:
@@ -325,6 +402,8 @@ class BeichtBot(commands.Bot):
             crisis=crisis_detected,
             pii=pii_detected,
         )
+        if moderation_result and moderation_result.flagged:
+            self.config.increment_stat(interaction.guild.id, "ai_flags")
 
         thread: Optional[discord.Thread] = None
         try:
@@ -337,7 +416,13 @@ class BeichtBot(commands.Bot):
         if config.auto_delete_minutes:
             await self._schedule_autodelete(message, config.auto_delete_minutes)
 
-        if crisis_detected or pii_detected:
+        if crisis_detected or pii_detected or (moderation_result and moderation_result.flagged):
+            ai_details = "Keine Treffer"
+            if moderation_result and moderation_result.flagged:
+                labels = moderation_result.flagged_labels
+                ai_details = ", ".join(labels) if labels else "Flagged"
+            elif moderation_result and moderation_result.error:
+                ai_details = f"Fehler: {moderation_result.error}"
             await self._notify_mods(
                 config,
                 interaction.guild,
@@ -347,6 +432,7 @@ class BeichtBot(commands.Bot):
                     Nachricht: https://discord.com/channels/{interaction.guild.id}/{message.channel.id}/{message.id}
                     Krise erkannt: {crisis_detected}
                     PII erkannt: {pii_detected}
+                    KI-Kategorien: {ai_details}
                     """
                 ).strip(),
             )
