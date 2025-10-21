@@ -583,6 +583,18 @@ class BeichtBot(commands.Bot):
         ai_moderation="Einfache KI-Moderation aktivieren",
         thread_lock="Threads standardmäßig sperren",
     )
+    @app_commands.choices(
+        ai_moderation=[
+            app_commands.Choice(name="Keine Änderung", value=""),
+            app_commands.Choice(name="Aktivieren", value="true"),
+            app_commands.Choice(name="Deaktivieren", value="false"),
+        ],
+        thread_lock=[
+            app_commands.Choice(name="Keine Änderung", value=""),
+            app_commands.Choice(name="Sperren", value="true"),
+            app_commands.Choice(name="Nicht sperren", value="false"),
+        ],
+    )
     @app_commands.checks.has_permissions(manage_guild=True)
     async def beichtbot_setup(
         self,
@@ -591,8 +603,8 @@ class BeichtBot(commands.Bot):
         mod_channel: Optional[discord.TextChannel] = None,
         cooldown: Optional[int] = None,
         auto_delete: Optional[int] = None,
-        ai_moderation: Optional[bool] = None,
-        thread_lock: Optional[bool] = None,
+        ai_moderation: Optional[app_commands.Choice[str]] = None,
+        thread_lock: Optional[app_commands.Choice[str]] = None,
     ) -> None:
         if not interaction.guild:
             await interaction.response.send_message("Nur in Servern verfügbar.", ephemeral=True)
@@ -604,10 +616,12 @@ class BeichtBot(commands.Bot):
             config.cooldown_seconds = max(0, cooldown)
         if auto_delete is not None:
             config.auto_delete_minutes = max(1, auto_delete)
-        if ai_moderation is not None:
-            config.allow_ai_moderation = ai_moderation
-        if thread_lock is not None:
-            config.default_thread_lock = thread_lock
+        parsed_ai = self._parse_bool((ai_moderation.value if ai_moderation else ""))
+        if parsed_ai is not None:
+            config.allow_ai_moderation = parsed_ai
+        parsed_lock = self._parse_bool((thread_lock.value if thread_lock else ""))
+        if parsed_lock is not None:
+            config.default_thread_lock = parsed_lock
         self.config.set_guild_config(config)
         await interaction.response.send_message("Konfiguration gespeichert.", ephemeral=True)
 
