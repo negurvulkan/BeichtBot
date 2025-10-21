@@ -153,7 +153,11 @@ class BeichtBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = False
         super().__init__(command_prefix="!", intents=intents)
-        self.tree = app_commands.CommandTree(self)
+        # ``commands.Bot`` already manages an ``app_commands.CommandTree`` instance via
+        # the ``tree`` attribute. Creating another instance would raise a
+        # ``ClientException`` because only one tree can be associated with the
+        # client. We therefore rely on the built-in tree provided by the base
+        # class instead of overwriting it here.
         self.config = config or ConfigStore()
         self.cooldowns: Dict[Tuple[int, int], float] = {}
         self.session_tasks: List[asyncio.Task[None]] = []
