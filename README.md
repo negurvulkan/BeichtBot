@@ -31,7 +31,7 @@ für eine moderne Nutzererfahrung.
 3. **Bot-Token konfigurieren:**
    - Erstelle im [Discord Developer Portal](https://discord.com/developers/applications) eine neue Anwendung.
    - Aktiviere den Bot-User und kopiere das Token.
-   - Setze die Umgebungsvariable `DISCORD_TOKEN` auf dieses Token.
+   - Setze die Umgebungsvariable `DISCORD_TOKEN` auf dieses Token oder lege eine `.env`-Datei mit dem Eintrag `DISCORD_TOKEN=<dein-token>` im Projektverzeichnis an.
 
 4. **Bot starten:**
 
