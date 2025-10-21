@@ -162,6 +162,7 @@ class BeichtBot(commands.Bot):
         self.cooldowns: Dict[Tuple[int, int], float] = {}
         self.session_tasks: List[asyncio.Task[None]] = []
         self._openai_client: Optional[AsyncOpenAI] = None
+        self._commands_synced = asyncio.Event()
         api_key = os.getenv("OPENAI_API_KEY")
         if AsyncOpenAI and api_key:
             self._openai_client = AsyncOpenAI(api_key=api_key)
@@ -184,7 +185,26 @@ class BeichtBot(commands.Bot):
         self.tree.add_command(self.beichtbot_banner)
         self.tree.add_command(self.beichtbot_nachricht)
         self.tree.add_command(self.beichtbot_cooldown)
-        await self.tree.sync()
+        # The actual sync is performed in ``on_ready`` to ensure guild data is
+        # available so we can push the updated signature immediately. Doing it
+        # there also avoids hitting the rate limits that Discord imposes on
+        # global command syncs when reconnecting frequently.
+
+    async def on_ready(self) -> None:  # pragma: no cover - handled by discord
+        if self._commands_synced.is_set():
+            return
+        try:
+            await self.tree.sync()
+            for guild in self.guilds:
+                try:
+                    await self.tree.sync(guild=guild)
+                except discord.HTTPException:
+                    log.warning("Failed to sync command tree for guild %s", guild.id)
+        except discord.HTTPException:
+            log.exception("Failed to sync global command tree")
+        else:
+            log.info("Command tree synced successfully")
+        self._commands_synced.set()
 
     # ------------------------------------------------------------------
     # Utility helpers
